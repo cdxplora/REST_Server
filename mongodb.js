@@ -1,96 +1,129 @@
 import {MongoClient, ObjectId} from'mongodb';
 
 const dbHost = "localhost:27017"
-const dbUser = "chioma"
-const dbPassword = "Chi_g0ld"
-const dbName = "testi"
+const dbAdmin = "mongoAdmin"
+const dbAdminPassword = "Chi_g0ld"
+const authDb = "admin"
+const destConnString = `mongodb://${dbAdmin}:${dbAdminPassword}@${destHost}?authSource=${authDb}`
+const dbMongo = "testi"
+const dbMongoUser = "chioma"
+const dbMongoPassword = "Chi_g0ld"
 const dataCollection = "data"
-const usersCollection = "users"
+const usersCollection = "user"
 
-const destConnString = `mongodb://${dbUser}:${dbPassword}@${dbHost}?authSource=${dbName}`
-const dbServer = new MongoClient(destConnString)
+const copyDataFromMariaToMongo = async () => {
+    const pool = createPool({
+        host: sourceHost,
+        user: dbMariaUser,
+        password: dbMariaPassword,
+        database: dbMaria
+    })
 
-
-let db;
-
-//let logonUsers = new Map();
-
-// Method for connecting to the database
-const openDbConn = async () => {
+    let conn
     try {
-        await dbServer.connect();
-        return dbServer.db(dbName)       
-    } catch (error) {
-		console.error("Failed to connect to the database", error)
-        throw error;
-    } 
-};
+        conn = await pool.getConnection()
+        const users = await conn.query("SELECT * FROM users")
+        const data = await conn.query("SELECT * FROM data")
 
-// Close the database connection
-
-const closeDbConnection = async () => {
-    try{
-        await dbServer.close()
-        console.log("Database connection closed")
-    } catch (error) {
-        console.error("Failed to close the database connection", error)
-    }
-};
-
-// Method for using a certain collection
-// This Method gets collection reference
-const connDbCollection = async (collection)  => {
-    return db.collection(collection)
-}
-
-// This Method executes the querry
-const sendQuery = async (query, toArray = false) => {
-    try {
-        const result = await query
-        return toArray ? result.toArray() : result
-        //if (toArray)
-        //    return result.toArray()
-        //else
-        //    console.log("Should do something")
-
+        createCollections(users, data)
     } catch (err) {
-        console.error("Query execution failed", err)
         throw err
+    } finally {
+        if(conn) await conn.close()
+        await pool.end()
     }
 }
 
-// This Method finds one user by username
-const  findOneUser = async (username) => {
-    const usersCol = await connDbCollection(usersCollection)
-    return usersCol.findOne({username});
-    // console.log(username)
-    // const usersCol = await connDbCollection (usersCollection)
-    // return sendQuery(usersCol.find(
-    //    {username}
-    // ))
-};
+const createCollections = async (usersData, dataData) => {
+    const dbServer = new MongoClient(destConnString)
 
-// Method to find all users
-const findAllUsers = async () => {
-    const usersCol = await connDbCollection(usersCollection)
-    return sendQuery(usersCol.find(), true)
+    try {
+        await dbServer.connect()
+        const db = dbServer.db(dbMongo)
+
+        const dbs = await db.admin().listDatabases()
+        if(dbs.databases.find(d => d.name === dbMongo))
+            await db.dropDatabase()
+
+        const users = db.collection( usersCollection, {
+            validator: {
+                $jsonSchema: {
+                    bsonType: "Object",
+                    required: ["username", "password"],
+                    properties: {
+                        username: {
+                            bsonType: "string",
+                            description: "must be a string and it is required"
+                        },
+                        password: {
+                            bsonType: "string",
+                            decription: "must be a string and it is required"
+                        }
+                    }
+                }
+            }
+        })
+        users.createIndex({"username": 1}, {unique: true})
+
+        let result = await users.insertMany(usersData)
+        console.log(`${result.insertedCount} users were inserted`)
+
+        const data = db.collection( dataCollection, {
+            validator: { $jsonSchema: {
+                bsonType: "object",
+                required: ["id", "Firstname", "Surname", "userid"],
+                properties: {
+                    _id: {
+                        bsonType: ObjectId,
+                        description: "Must contain unique hex value"
+                    },
+                    Firstname: {
+                        bsonType: "string",
+                        description: "must be a string and is required"
+                    },
+                    Surname: {
+                        bsonType: "string",
+                        description: "must be a string and is required"
+                    },
+                    userid: {
+                        bsonType: "string",
+                        description: "must be a string and it should be in users colelction, too"
+                    },
+                }
+            }}
+        })
+
+        const processedData = await dataData.map(doc => {
+            return {
+                _id: ObjectId.createFromHexString(doc.id.toString(16).padStart(24,'0')),
+                Firstname: doc.Firstname,
+                Surname: doc.Surname,
+                userid: doc.userid
+            }
+        })
+        
+        console.log(processedData)
+
+        result = await data.insertMany(processedData)
+        console.log(`${result.insertedCount} data records were inserted`)
+        
+        const userExist = await db.command({ usersInfo: dbMongoUser})
+        if(!userExist.users[0]) {
+            result = await db.command({
+                createUser: dbMongoUser,
+                pwd: dbMongoPassword,
+                roles: [{role: 'readWrite', db: dbMongo}]
+            })
+            console.log("User created successfully", result)
+        } else
+            console.log("User", userExist.users[0].user, "already exist with roles:", 
+                        userExist.users[0].roles)
+    } catch (e) {
+        console.log(e)
+    } finally {
+        await dbServer.close()
+    }
+
 }
 
-// Initialize the database connection
-openDbConn().catch(console.error);
-
-// Handle server exit
-process.on("SIGINT", async () => {
-    await closeDbConnection();no
-    process.exit(0);
-});
-
-export { findOneUser, findAllUsers, closeDbConnection };
-
-/* Some code here */
-
-// Connects to database when the application starts
-// const db = await openDbConn()
-
-
-    
+copyDataFromMariaToMongo()
